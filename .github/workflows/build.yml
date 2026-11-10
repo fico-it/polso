@@ -14,9 +14,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Estrai il progetto
-        run: unzip -o polso.zip
-
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
