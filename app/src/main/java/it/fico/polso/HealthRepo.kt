@@ -37,6 +37,7 @@ data class ExerciseInfo(val name: String, val start: Instant, val end: Instant)
 
 data class HeartInfo(
     val bins: List<TimedValue>,   // medie a 5 minuti
+    val fine: List<TimedValue>,   // medie a 1 minuto, per lo zoom
     val min: Long,
     val max: Long,
     val avg: Long,
@@ -264,8 +265,17 @@ class HealthRepo(context: Context) {
                             list.map { it.beatsPerMinute }.average(),
                         )
                     }
+                val fine = samples
+                    .groupBy { Duration.between(start, it.time).toMinutes() }
+                    .toSortedMap()
+                    .map { (minute, list) ->
+                        TimedValue(
+                            start.plus(Duration.ofSeconds(minute * 60 + 30)),
+                            list.map { it.beatsPerMinute }.average(),
+                        )
+                    }
                 val bpm = samples.map { it.beatsPerMinute }
-                HeartInfo(bins, bpm.min(), bpm.max(), bpm.average().toLong())
+                HeartInfo(bins, fine, bpm.min(), bpm.max(), bpm.average().toLong())
             }
         } else null
 

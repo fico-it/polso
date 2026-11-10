@@ -28,6 +28,7 @@ import androidx.compose.ui.graphics.Path
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.drawscope.clipRect
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
@@ -54,17 +55,35 @@ fun LineChart(
     gap: Float = 1f,
     gridColumns: Int = 4,
     dots: Boolean = false,
+    modifier: Modifier = Modifier,
+    viewStart: Float = 0f,
+    viewScale: Float = 1f,
+    timeGrid: Boolean = false,
 ) {
     Canvas(
-        Modifier
+        modifier
             .fillMaxWidth()
             .height(height)
     ) {
         val w = size.width
         val h = size.height
-        for (i in 0..gridColumns) {
-            val x = w * i / gridColumns
-            drawLine(Palette.Grid, Offset(x, 0f), Offset(x, h), strokeWidth = 1f)
+        fun px(x: Float) = (x - viewStart) * viewScale * w
+
+        if (timeGrid) {
+            val (labelStep, _) = timeTicks(viewScale)
+            var m = 0
+            while (m <= 1440) {
+                val x = px(m / 1440f)
+                if (x in -1f..w + 1f) {
+                    drawLine(Palette.Grid, Offset(x, 0f), Offset(x, h), strokeWidth = 1f)
+                }
+                m += labelStep
+            }
+        } else {
+            for (i in 0..gridColumns) {
+                val x = w * i / gridColumns
+                drawLine(Palette.Grid, Offset(x, 0f), Offset(x, h), strokeWidth = 1f)
+            }
         }
         for (i in 0..2) {
             val y = h * i / 2f
@@ -76,27 +95,41 @@ fun LineChart(
         val path = Path()
         var prevX = -10f
         points.forEachIndexed { i, (x, y) ->
-            val px = x * w
-            if (i == 0 || x - prevX > gap) path.moveTo(px, py(y)) else path.lineTo(px, py(y))
+            val p = px(x)
+            if (i == 0 || x - prevX > gap) path.moveTo(p, py(y)) else path.lineTo(p, py(y))
             prevX = x
         }
-        drawPath(
-            path,
-            color,
-            style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round),
-        )
-        if (dots || points.size == 1) {
-            points.forEach { (x, y) -> drawCircle(color, 3.dp.toPx(), Offset(x * w, py(y))) }
+        clipRect(0f, 0f, w, h) {
+            drawPath(
+                path,
+                color,
+                style = Stroke(width = 2.dp.toPx(), cap = StrokeCap.Round, join = StrokeJoin.Round),
+            )
+            if (dots || points.size == 1) {
+                points.forEach { (x, y) ->
+                    val p = px(x)
+                    if (p in -4f..w + 4f) drawCircle(color, 3.dp.toPx(), Offset(p, py(y)))
+                }
+            }
         }
     }
 }
 
+/** Passo delle etichette e delle tacche (in minuti) in base allo zoom. */
+fun timeTicks(scale: Float): Pair<Int, Int> {
+    val visible = 1440f / scale
+    val options = listOf(5 to 1, 10 to 5, 15 to 5, 30 to 10, 60 to 15, 120 to 30, 180 to 60)
+    return options.firstOrNull { it.first >= visible / 8f } ?: options.last()
+}
+
 /**
- * Asse orario fine per i grafici delle 24 ore: tacca ogni ora, tacca lunga
- * ogni 3 ore, etichetta ogni 3 ore. Va posto subito sotto un grafico a tutta larghezza.
+ * Asse orario fine sotto i grafici delle 24 ore. Segue lo zoom: con la
+ * giornata intera tacca ogni ora ed etichetta ogni 3 ore, ingrandendo
+ * scende fino a tacche di un minuto ed etichette ogni 5 minuti.
  */
 @Composable
-fun HourAxis() {
+fun HourAxis(viewStart: Float = 0f, viewScale: Float = 1f) {
+    val (labelStep, minorStep) = timeTicks(viewScale)
     Column(Modifier.fillMaxWidth()) {
         Canvas(
             Modifier
@@ -104,19 +137,24 @@ fun HourAxis() {
                 .height(8.dp)
         ) {
             val w = size.width
-            for (h in 0..24) {
-                val x = (w * h / 24f).coerceIn(0.5f, w - 0.5f)
-                val len = when {
-                    h % 6 == 0 -> 8.dp.toPx()
-                    h % 3 == 0 -> 6.dp.toPx()
-                    else -> 3.dp.toPx()
+            var m = 0
+            while (m <= 1440) {
+                val x = (m / 1440f - viewStart) * viewScale * w
+                if (x in -1f..w + 1f) {
+                    val major = m % labelStep == 0
+                    val len = when {
+                        major && m % (labelStep * 2) == 0 -> 8.dp.toPx()
+                        major -> 6.dp.toPx()
+                        else -> 3.dp.toPx()
+                    }
+                    drawLine(
+                        if (major) Palette.GridHi else Palette.Grid,
+                        Offset(x.coerceIn(0.5f, w - 0.5f), 0f),
+                        Offset(x.coerceIn(0.5f, w - 0.5f), len),
+                        strokeWidth = 1.dp.toPx(),
+                    )
                 }
-                drawLine(
-                    if (h % 3 == 0) Palette.GridHi else Palette.Grid,
-                    Offset(x, 0f),
-                    Offset(x, len),
-                    strokeWidth = 1.dp.toPx(),
-                )
+                m += minorStep
             }
         }
         BoxWithConstraints(
@@ -124,21 +162,28 @@ fun HourAxis() {
                 .fillMaxWidth()
                 .height(14.dp)
         ) {
-            val labelW = 18.dp
-            for (h in 0..24 step 3) {
-                val x = (maxWidth * h / 24f - labelW / 2).coerceIn(0.dp, maxWidth - labelW)
-                Text(
-                    text = "%02d".format(h),
-                    fontSize = 9.sp,
-                    fontFamily = FontFamily.Monospace,
-                    color = if (h % 6 == 0) Palette.Text.copy(alpha = 0.75f) else Palette.Muted,
-                    textAlign = TextAlign.Center,
-                    maxLines = 1,
-                    softWrap = false,
-                    modifier = Modifier
-                        .width(labelW)
-                        .offset(x = x),
-                )
+            val withMinutes = labelStep < 60
+            val labelW = if (withMinutes) 34.dp else 18.dp
+            var m = 0
+            while (m <= 1440) {
+                val f = (m / 1440f - viewStart) * viewScale
+                if (f in -0.001f..1.001f) {
+                    val x = (maxWidth * f - labelW / 2).coerceIn(0.dp, maxWidth - labelW)
+                    val text = if (withMinutes) "%02d:%02d".format(m / 60, m % 60) else "%02d".format(m / 60)
+                    Text(
+                        text = text,
+                        fontSize = 9.sp,
+                        fontFamily = FontFamily.Monospace,
+                        color = if (m % (labelStep * 2) == 0) Palette.Text.copy(alpha = 0.75f) else Palette.Muted,
+                        textAlign = TextAlign.Center,
+                        maxLines = 1,
+                        softWrap = false,
+                        modifier = Modifier
+                            .width(labelW)
+                            .offset(x = x),
+                    )
+                }
+                m += labelStep
             }
         }
     }

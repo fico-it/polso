@@ -1,6 +1,14 @@
 package it.fico.polso
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.calculateCentroid
+import androidx.compose.foundation.gestures.calculatePan
+import androidx.compose.foundation.gestures.calculateZoom
+import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.ui.input.pointer.pointerInput
+import kotlin.math.abs
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
@@ -528,18 +536,121 @@ private fun HeartCard(d: DayData, h: HeartInfo) {
             restingToday?.let { Tile("${it.value.toLong()}", "a riposo", Palette.Resting, Modifier.weight(1f)) }
         }
         Spacer(Modifier.height(16.dp))
-        val pts = h.bins.map { Duration.between(d.dayStart, it.time).seconds / 86_400f to it.value.toFloat() }
-        val lo = (h.min - 5).toFloat()
-        val hi = (h.max + 5).toFloat()
-        LineChart(pts, Palette.Heart, lo, hi, height = 150.dp, gap = 30f / 1440f, gridColumns = 8)
-        HourAxis()
-        Caption("bpm · scala ${lo.toInt()}–${hi.toInt()}")
+        ZoomableHeartChart(d, h)
         d.resting?.takeIf { it.size >= 2 }?.let { list ->
             Spacer(Modifier.height(16.dp))
             Text("Battito a riposo, 30 giorni", fontSize = 12.sp, color = Palette.Resting)
             Spacer(Modifier.height(6.dp))
             Sparkline(list, Palette.Resting)
         }
+    }
+}
+
+/**
+ * Battito delle 24 ore ingrandibile: due dita per lo zoom (centrato fra le
+ * dita), un dito in orizzontale per scorrere quando è ingrandito, doppio
+ * tocco per tornare alla giornata intera.
+ */
+@Composable
+private fun ZoomableHeartChart(d: DayData, h: HeartInfo) {
+    var scale by remember(d.day) { mutableFloatStateOf(1f) }
+    var start by remember(d.day) { mutableFloatStateOf(0f) }
+    val maxScale = 48f // finestra minima: 30 minuti
+
+    fun clampStart(s: Float, sc: Float) = s.coerceIn(0f, (1f - 1f / sc).coerceAtLeast(0f))
+
+    val source = if (scale >= 3f) h.fine else h.bins
+    val pts = source.map { Duration.between(d.dayStart, it.time).seconds / 86_400f to it.value.toFloat() }
+    val end = start + 1f / scale
+    val visible = pts.filter { it.first in start..end }
+    val lo: Float
+    val hi: Float
+    if (scale > 1f && visible.isNotEmpty()) {
+        val vMin = visible.minOf { it.second }
+        val vMax = visible.maxOf { it.second }
+        val pad = ((vMax - vMin) * 0.15f).coerceAtLeast(3f)
+        lo = vMin - pad
+        hi = vMax + pad
+    } else {
+        lo = (h.min - 5).toFloat()
+        hi = (h.max + 5).toFloat()
+    }
+
+    var lastTap by remember { mutableStateOf(0L) }
+    val gesture = Modifier.pointerInput(d.day) {
+        awaitEachGesture {
+            val down = awaitFirstDown(requireUnconsumed = false)
+            var multi = false
+            var moved = false
+            do {
+                val event = awaitPointerEvent()
+                val pressed = event.changes.count { it.pressed }
+                val width = size.width.toFloat().coerceAtLeast(1f)
+                if (pressed >= 2) {
+                    multi = true
+                    val zoom = event.calculateZoom()
+                    val pan = event.calculatePan()
+                    val c = (event.calculateCentroid(useCurrent = true).x / width).coerceIn(0f, 1f)
+                    val focus = start + c / scale
+                    val newScale = (scale * zoom).coerceIn(1f, maxScale)
+                    val newStart = focus - c / newScale - pan.x / width / newScale
+                    scale = newScale
+                    start = clampStart(newStart, newScale)
+                    event.changes.forEach { it.consume() }
+                } else if (pressed == 1) {
+                    val pan = event.calculatePan()
+                    val drift = event.changes.first().position - down.position
+                    if (abs(drift.x) > 12f || abs(drift.y) > 12f) moved = true
+                    if (scale > 1f && abs(pan.x) > abs(pan.y)) {
+                        start = clampStart(start - pan.x / width / scale, scale)
+                        event.changes.forEach { it.consume() }
+                    }
+                }
+            } while (event.changes.any { it.pressed })
+
+            // doppio tocco: torna alla giornata intera
+            val now = android.os.SystemClock.uptimeMillis()
+            val quick = now - down.uptimeMillis < 300
+            if (!multi && !moved && quick) {
+                if (now - lastTap < 350) {
+                    scale = 1f
+                    start = 0f
+                    lastTap = 0L
+                } else {
+                    lastTap = now
+                }
+            }
+        }
+    }
+
+    LineChart(
+        pts,
+        Palette.Heart,
+        lo,
+        hi,
+        height = 170.dp,
+        gap = if (source === h.fine) 10f / 1440f else 30f / 1440f,
+        dots = scale >= 12f,
+        modifier = gesture,
+        viewStart = start,
+        viewScale = scale,
+        timeGrid = true,
+    )
+    HourAxis(start, scale)
+
+    val fromMin = (start * 1440).toInt()
+    val toMin = (end * 1440).toInt().coerceAtMost(1440)
+    if (scale > 1.01f) {
+        val vMin = visible.minOfOrNull { it.second }?.toInt()
+        val vMax = visible.maxOfOrNull { it.second }?.toInt()
+        Caption(
+            "%02d:%02d–%02d:%02d".format(fromMin / 60, fromMin % 60, toMin / 60, toMin % 60) +
+                (if (vMin != null) " · min $vMin · max $vMax bpm" else " · nessuna misura") +
+                " · doppio tocco per le 24 ore",
+            Palette.Text,
+        )
+    } else {
+        Caption("bpm · scala ${lo.toInt()}–${hi.toInt()} · allarga con due dita per il dettaglio")
     }
 }
 
