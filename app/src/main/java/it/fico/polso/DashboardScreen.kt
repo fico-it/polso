@@ -14,6 +14,8 @@ import androidx.compose.foundation.border
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxWithConstraints
+import androidx.compose.foundation.layout.offset
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
@@ -577,65 +579,147 @@ private fun ZoomableHeartChart(d: DayData, h: HeartInfo) {
     }
 
     var lastTap by remember { mutableStateOf(0L) }
+    // posizione del cursore come frazione della giornata (null = nascosto)
+    var cursorX by remember(d.day) { mutableStateOf<Float?>(null) }
+
+    fun toDataX(px: Float, width: Float) = (start + (px / width).coerceIn(0f, 1f) / scale).coerceIn(0f, 1f)
+
     val gesture = Modifier.pointerInput(d.day) {
         awaitEachGesture {
             val down = awaitFirstDown(requireUnconsumed = false)
-            var multi = false
-            var moved = false
-            do {
-                val event = awaitPointerEvent()
-                val pressed = event.changes.count { it.pressed }
-                val width = size.width.toFloat().coerceAtLeast(1f)
-                if (pressed >= 2) {
-                    multi = true
-                    val zoom = event.calculateZoom()
-                    val pan = event.calculatePan()
-                    val c = (event.calculateCentroid(useCurrent = true).x / width).coerceIn(0f, 1f)
-                    val focus = start + c / scale
-                    val newScale = (scale * zoom).coerceIn(1f, maxScale)
-                    val newStart = focus - c / newScale - pan.x / width / newScale
-                    scale = newScale
-                    start = clampStart(newStart, newScale)
-                    event.changes.forEach { it.consume() }
-                } else if (pressed == 1) {
-                    val pan = event.calculatePan()
-                    val drift = event.changes.first().position - down.position
-                    if (abs(drift.x) > 12f || abs(drift.y) > 12f) moved = true
-                    if (scale > 1f && abs(pan.x) > abs(pan.y)) {
-                        start = clampStart(start - pan.x / width / scale, scale)
-                        event.changes.forEach { it.consume() }
+            val width = size.width.toFloat().coerceAtLeast(1f)
+            val slop = viewConfiguration.touchSlop
+
+            // Fase 1 (400 ms): capire che gesto è.
+            // null = dito fermo a lungo → cursore trascinabile
+            val kind: String? = withTimeoutOrNull(400L) {
+                var result: String? = null
+                while (result == null) {
+                    val ev = awaitPointerEvent()
+                    val pressed = ev.changes.count { it.pressed }
+                    val drift = ev.changes.first().position - down.position
+                    result = when {
+                        pressed >= 2 -> "multi"
+                        pressed == 0 -> "tap"
+                        abs(drift.x) > slop && abs(drift.x) > abs(drift.y) -> "hdrag"
+                        abs(drift.y) > slop -> "vdrag"
+                        else -> null
                     }
                 }
-            } while (event.changes.any { it.pressed })
+                result
+            }
 
-            // doppio tocco: torna alla giornata intera
-            val now = android.os.SystemClock.uptimeMillis()
-            val quick = now - down.uptimeMillis < 300
-            if (!multi && !moved && quick) {
-                if (now - lastTap < 350) {
-                    scale = 1f
-                    start = 0f
-                    lastTap = 0L
-                } else {
-                    lastTap = now
+            when (kind) {
+                "tap" -> {
+                    val now = android.os.SystemClock.uptimeMillis()
+                    if (now - lastTap < 350) {
+                        // doppio tocco: giornata intera, cursore via
+                        scale = 1f
+                        start = 0f
+                        cursorX = null
+                        lastTap = 0L
+                    } else {
+                        cursorX = toDataX(down.position.x, width)
+                        lastTap = now
+                    }
                 }
+
+                "vdrag" -> Unit // lascia scorrere la pagina
+
+                null, "hdrag" -> {
+                    if (kind == "hdrag" && scale > 1f) {
+                        // ingrandito: un dito in orizzontale scorre la finestra
+                        do {
+                            val ev = awaitPointerEvent()
+                            if (ev.changes.count { it.pressed } >= 2) break
+                            val pan = ev.calculatePan()
+                            start = clampStart(start - pan.x / width / scale, scale)
+                            ev.changes.forEach { it.consume() }
+                        } while (ev.changes.any { it.pressed })
+                    } else {
+                        // cursore che segue il dito
+                        var pos = down.position.x
+                        cursorX = toDataX(pos, width)
+                        do {
+                            val ev = awaitPointerEvent()
+                            val ch = ev.changes.firstOrNull { it.pressed } ?: break
+                            pos = ch.position.x
+                            cursorX = toDataX(pos, width)
+                            ev.changes.forEach { it.consume() }
+                        } while (ev.changes.any { it.pressed })
+                    }
+                }
+            }
+
+            if (kind == "multi" || currentEvent.changes.count { it.pressed } >= 2) {
+                // zoom con due dita (centrato fra le dita) + spostamento
+                do {
+                    val ev = awaitPointerEvent()
+                    if (ev.changes.count { it.pressed } >= 2) {
+                        val zoom = ev.calculateZoom()
+                        val pan = ev.calculatePan()
+                        val c = (ev.calculateCentroid(useCurrent = true).x / width).coerceIn(0f, 1f)
+                        val focus = start + c / scale
+                        val newScale = (scale * zoom).coerceIn(1f, maxScale)
+                        val newStart = focus - c / newScale - pan.x / width / newScale
+                        scale = newScale
+                        start = clampStart(newStart, newScale)
+                    }
+                    ev.changes.forEach { it.consume() }
+                } while (ev.changes.any { it.pressed })
             }
         }
     }
 
-    LineChart(
-        pts,
-        Palette.Heart,
-        lo,
-        hi,
-        height = 170.dp,
-        gap = if (source === h.fine) 10f / 1440f else 30f / 1440f,
-        dots = scale >= 12f,
-        modifier = gesture,
-        viewStart = start,
-        viewScale = scale,
-        timeGrid = true,
-    )
+    // punto più vicino al cursore
+    val cursorPoint = cursorX?.let { cx ->
+        pts.minByOrNull { abs(it.first - cx) }?.takeIf { it.first in start..end }
+    }
+
+    BoxWithConstraints(Modifier.fillMaxWidth()) {
+        LineChart(
+            pts,
+            Palette.Heart,
+            lo,
+            hi,
+            height = 170.dp,
+            gap = if (source === h.fine) 10f / 1440f else 30f / 1440f,
+            dots = scale >= 12f,
+            modifier = gesture,
+            viewStart = start,
+            viewScale = scale,
+            timeGrid = true,
+            cursor = cursorPoint,
+        )
+        if (cursorPoint != null) {
+            val minutes = (cursorPoint.first * 1440).toInt().coerceIn(0, 1439)
+            val tipW = 92.dp
+            val rel = (cursorPoint.first - start) * scale
+            val x = (maxWidth * rel - tipW / 2).coerceIn(0.dp, maxWidth - tipW)
+            Column(
+                Modifier
+                    .offset(x = x, y = 4.dp)
+                    .width(tipW)
+                    .clip(RoundedCornerShape(10.dp))
+                    .background(Palette.Bg.copy(alpha = 0.92f))
+                    .border(1.dp, Palette.Heart.copy(alpha = 0.6f), RoundedCornerShape(10.dp))
+                    .padding(vertical = 5.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+            ) {
+                Text(
+                    "%02d:%02d".format(minutes / 60, minutes % 60),
+                    fontSize = 11.sp,
+                    color = Palette.Muted,
+                )
+                Text(
+                    "${cursorPoint.second.toInt()} bpm",
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Black,
+                    color = Palette.Heart,
+                )
+            }
+        }
+    }
     HourAxis(start, scale)
 
     val fromMin = (start * 1440).toInt()
@@ -650,7 +734,7 @@ private fun ZoomableHeartChart(d: DayData, h: HeartInfo) {
             Palette.Text,
         )
     } else {
-        Caption("bpm · scala ${lo.toInt()}–${hi.toInt()} · allarga con due dita per il dettaglio")
+        Caption("Tocca o tieni premuto per leggere ora e bpm · allarga con due dita per il dettaglio")
     }
 }
 

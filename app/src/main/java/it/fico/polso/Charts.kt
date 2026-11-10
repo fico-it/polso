@@ -25,6 +25,7 @@ import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.geometry.Size
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.graphics.PathEffect
 import androidx.compose.ui.graphics.StrokeCap
 import androidx.compose.ui.graphics.StrokeJoin
 import androidx.compose.ui.graphics.drawscope.Stroke
@@ -59,6 +60,7 @@ fun LineChart(
     viewStart: Float = 0f,
     viewScale: Float = 1f,
     timeGrid: Boolean = false,
+    cursor: Pair<Float, Float>? = null,
 ) {
     Canvas(
         modifier
@@ -110,6 +112,18 @@ fun LineChart(
                     val p = px(x)
                     if (p in -4f..w + 4f) drawCircle(color, 3.dp.toPx(), Offset(p, py(y)))
                 }
+            }
+            if (cursor != null) {
+                val cx = px(cursor.first)
+                val cy = py(cursor.second)
+                val dash = PathEffect.dashPathEffect(floatArrayOf(4.dp.toPx(), 4.dp.toPx()))
+                drawLine(Palette.Text.copy(alpha = 0.7f), Offset(cx, 0f), Offset(cx, h), strokeWidth = 1.dp.toPx())
+                drawLine(
+                    Palette.Text.copy(alpha = 0.35f), Offset(0f, cy), Offset(w, cy),
+                    strokeWidth = 1.dp.toPx(), pathEffect = dash,
+                )
+                drawCircle(Palette.Text, 6.dp.toPx(), Offset(cx, cy))
+                drawCircle(color, 4.dp.toPx(), Offset(cx, cy))
             }
         }
     }
