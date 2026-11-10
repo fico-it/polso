@@ -158,6 +158,92 @@ class HealthRepo(context: Context) {
         }
     }
 
+    /**
+     * Storico giornaliero lungo (fino a 3 anni) per la valutazione: passi,
+     * sonno, orario di addormentamento, battito a riposo, HRV, SpO₂ minima.
+     */
+    suspend fun longHistory(granted: Set<String>, today: LocalDate = LocalDate.now()): List<DailyMetrics> {
+        val from = today.minusDays(3 * 365L)
+        val steps = dailySeries(Metric.STEPS, from, today, granted) ?: emptyMap()
+        val resting = dailySeries(Metric.RESTING, from, today, granted) ?: emptyMap()
+        val hrv = dailySeries(Metric.HRV, from, today, granted) ?: emptyMap()
+
+        val sleepByDay = mutableMapOf<LocalDate, Pair<Double, Int>>() // ore dormite, minuti dalle 18:00
+        if (granted.allows(SleepSessionRecord::class)) safe {
+            val f = from.minusDays(1).atTime(18, 0).atZone(zone).toInstant()
+            val t = today.atTime(18, 0).atZone(zone).toInstant()
+            readAll(SleepSessionRecord::class, TimeRangeFilter.between(f, t))
+                .groupBy { it.endTime.atZone(zone).toLocalDate() }
+                .forEach { (date, sessions) ->
+                    val asleep = sessions.sumOf { s ->
+                        val total = Duration.between(s.startTime, s.endTime).seconds
+                        val awake = s.stages
+                            .filter {
+                                it.stage == SleepSessionRecord.STAGE_TYPE_AWAKE ||
+                                    it.stage == SleepSessionRecord.STAGE_TYPE_AWAKE_IN_BED ||
+                                    it.stage == SleepSessionRecord.STAGE_TYPE_OUT_OF_BED
+                            }
+                            .sumOf { Duration.between(it.startTime, it.endTime).seconds }
+                        (total - awake).coerceAtLeast(0L)
+                    } / 3600.0
+                    val main = sessions.maxBy { Duration.between(it.startTime, it.endTime).seconds }
+                    val bed = main.startTime.atZone(zone)
+                    val eveningStart = bed.toLocalDate().atTime(18, 0).atZone(zone)
+                    val minutesFrom18 = Duration.between(eveningStart, bed).toMinutes().let {
+                        if (it < 0) it + 24 * 60 else it
+                    }.toInt()
+                    sleepByDay[date] = asleep to minutesFrom18
+                }
+        }
+
+        val spo2Min = mutableMapOf<LocalDate, Double>()
+        if (granted.allows(OxygenSaturationRecord::class)) safe {
+            readAll(
+                OxygenSaturationRecord::class,
+                TimeRangeFilter.between(from.atStartOfDay(zone).toInstant(), today.plusDays(1).atStartOfDay(zone).toInstant()),
+            ).forEach {
+                val d = it.time.atZone(zone).toLocalDate()
+                val v = it.percentage.value
+                spo2Min[d] = minOf(spo2Min[d] ?: v, v)
+            }
+        }
+
+        val days = (steps.keys + resting.keys + hrv.keys + sleepByDay.keys + spo2Min.keys).toSortedSet()
+        return days.map { d ->
+            DailyMetrics(
+                date = d,
+                steps = steps[d]?.toLong(),
+                sleepHours = sleepByDay[d]?.first,
+                bedtimeFrom18 = sleepByDay[d]?.second,
+                restingHr = resting[d],
+                hrv = hrv[d],
+                spo2Min = spo2Min[d],
+            )
+        }
+    }
+
+    /** Passi ora per ora degli ultimi [days] giorni (oggi compreso). */
+    suspend fun hourlyProfile(granted: Set<String>, days: Int = 28, today: LocalDate = LocalDate.now()): Map<LocalDate, List<Long>> {
+        if (!granted.allows(StepsRecord::class)) return emptyMap()
+        return safe {
+            val start = today.minusDays(days - 1L).atStartOfDay(zone).toInstant()
+            val end = today.plusDays(1).atStartOfDay(zone).toInstant()
+            val out = mutableMapOf<LocalDate, LongArray>()
+            client.aggregateGroupByDuration(
+                AggregateGroupByDurationRequest(
+                    metrics = setOf(StepsRecord.COUNT_TOTAL),
+                    timeRangeFilter = TimeRangeFilter.between(start, end),
+                    timeRangeSlicer = Duration.ofHours(1),
+                )
+            ).forEach { r ->
+                val z = r.startTime.atZone(zone)
+                val arr = out.getOrPut(z.toLocalDate()) { LongArray(24) }
+                arr[z.hour] += r.result[StepsRecord.COUNT_TOTAL] ?: 0L
+            }
+            out.mapValues { it.value.toList() }
+        } ?: emptyMap()
+    }
+
     suspend fun granted(): Set<String> =
         client.permissionController.getGrantedPermissions()
 

@@ -7,9 +7,13 @@ import androidx.compose.runtime.setValue
 import androidx.health.connect.client.HealthConnectClient
 import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.time.LocalDate
+import java.time.LocalDateTime
 
 enum class Status { CHECKING, UNAVAILABLE, NEEDS_PERMISSION, READY }
 
@@ -39,6 +43,13 @@ class DashboardViewModel(app: Application) : AndroidViewModel(app) {
     var historyUnavailable by mutableStateOf(false)
         private set
 
+    // --- valutazione ---
+    var coach by mutableStateOf<CoachResult?>(null)
+        private set
+    private var longHistory: List<DailyMetrics>? = null
+    private var longHistoryAt = 0L
+    private var coachJob: Job? = null
+
     private var repo: HealthRepo? = null
     private var loadJob: Job? = null
     private var historyJob: Job? = null
@@ -63,6 +74,7 @@ class DashboardViewModel(app: Application) : AndroidViewModel(app) {
             status = Status.READY
             load()
             loadHistory()
+            loadCoach()
         }
     }
 
@@ -101,6 +113,33 @@ class DashboardViewModel(app: Application) : AndroidViewModel(app) {
             historyUnavailable = daily == null
             history = daily?.let { buildSeries(metric, period, anchor, it) }
             historyLoading = false
+        }
+    }
+
+    private fun loadCoach() {
+        val r = repo ?: return
+        val perms = granted
+        coachJob?.cancel()
+        coachJob = viewModelScope.launch {
+            try {
+                val now = System.currentTimeMillis()
+                // lo storico lungo si ricarica al massimo ogni 20 minuti
+                val hist = longHistory?.takeIf { now - longHistoryAt < 20 * 60_000L }
+                    ?: r.longHistory(perms).also {
+                        longHistory = it
+                        longHistoryAt = now
+                    }
+                val hourly = r.hourlyProfile(perms)
+                val seed = settings.nextSeed()
+                val goal = settings.stepGoal
+                coach = withContext(Dispatchers.Default) {
+                    Coach.evaluate(hist, hourly, goal, LocalDateTime.now(), seed)
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                // la valutazione è un di più: se fallisce, il cruscotto resta com'è
+            }
         }
     }
 

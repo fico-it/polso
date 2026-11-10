@@ -1,6 +1,10 @@
 package it.fico.polso
 
 import androidx.activity.compose.BackHandler
+import androidx.compose.animation.animateColorAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.calculateCentroid
@@ -74,7 +78,12 @@ fun DashboardScreen(
 ) {
     BackHandler(enabled = vm.showSettings) { vm.showSettings = false }
 
-    Surface(Modifier.fillMaxSize(), color = Palette.Bg, contentColor = Palette.Text) {
+    val bg by animateColorAsState(
+        targetValue = vm.coach?.background ?: Palette.Bg,
+        animationSpec = tween(1500),
+        label = "sfondo",
+    )
+    Surface(Modifier.fillMaxSize(), color = bg, contentColor = Palette.Text) {
         Box(Modifier.safeDrawingPadding()) {
             when (vm.status) {
                 Status.CHECKING -> Centered { Text("…", color = Palette.Muted) }
@@ -159,6 +168,9 @@ private fun Dashboard(
         s.order.filter { s.isVisible(it) }.forEach { card ->
             if (card == CardId.HISTORY) {
                 item(key = card.name) { HistoryCard(vm) }
+            } else if (card == CardId.TIPS) {
+                val c = vm.coach
+                if (c != null && c.tips.isNotEmpty()) item(key = card.name) { TipsCard(c) }
             } else if (d != null) {
                 when (card) {
                     CardId.STEPS -> {
@@ -204,7 +216,7 @@ private fun Dashboard(
                         val list = d.exercises
                         if (list != null) item(key = card.name) { WorkoutsCard(list) }
                     }
-                    CardId.HISTORY -> Unit
+                    CardId.HISTORY, CardId.TIPS -> Unit
                 }
             }
         }
@@ -228,6 +240,28 @@ private fun Header(vm: DashboardViewModel, isToday: Boolean) {
                 )
             }
             Pill("Personalizza", selected = false, color = Palette.Steps) { vm.showSettings = true }
+        }
+        vm.coach?.phrase?.takeIf { it.isNotBlank() }?.let { phrase ->
+            Spacer(Modifier.height(8.dp))
+            Row(verticalAlignment = Alignment.Top) {
+                Box(
+                    Modifier
+                        .padding(top = 3.dp)
+                        .size(width = 3.dp, height = 30.dp)
+                        .clip(RoundedCornerShape(2.dp))
+                        .background(Palette.Steps.copy(alpha = 0.8f))
+                )
+                Spacer(Modifier.width(10.dp))
+                Text(
+                    phrase,
+                    fontSize = 14.sp,
+                    lineHeight = 19.sp,
+                    fontStyle = FontStyle.Italic,
+                    color = Palette.Text.copy(alpha = 0.9f),
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
         }
         Spacer(Modifier.height(10.dp))
         Row(
@@ -523,6 +557,34 @@ private fun HistoryCard(vm: DashboardViewModel) {
         }
         if (!vm.hasHistoryPermission) {
             Caption("Per i dati di oltre 30 giorni fa attiva l'accesso allo storico in Personalizza.")
+        }
+    }
+}
+
+@Composable
+private fun TipsCard(c: CoachResult) {
+    Card("Il parere di Polso", Palette.Hrv) {
+        c.tips.forEachIndexed { i, t ->
+            if (i > 0) Spacer(Modifier.height(10.dp))
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(16.dp))
+                    .background(t.color.copy(alpha = 0.10f))
+                    .border(1.dp, t.color.copy(alpha = 0.25f), RoundedCornerShape(16.dp))
+                    .padding(14.dp)
+            ) {
+                Text(t.title, fontSize = 15.sp, fontWeight = FontWeight.Bold, color = t.color)
+                Spacer(Modifier.height(4.dp))
+                Text(t.text, fontSize = 13.sp, lineHeight = 19.sp, color = Palette.Text.copy(alpha = 0.9f))
+            }
+        }
+        c.score?.let { sc ->
+            Caption(
+                "Indice di forma ${(sc * 100).toInt()}%" +
+                    (c.recentScore?.let { " · ultimi 7 giorni ${(it * 100).toInt()}%" } ?: "") +
+                    " · su ${c.daysOfData} giorni di dati",
+            )
         }
     }
 }

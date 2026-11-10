@@ -16,6 +16,7 @@ enum class CardId(val label: String) {
     SPO2("Ossigeno nel sangue"),
     RESPIRATION("Frequenza respiratoria"),
     WORKOUTS("Allenamenti"),
+    TIPS("Consigli di Polso"),
 }
 
 /** Preferenze salvate sul telefono, osservabili da Compose. */
@@ -36,6 +37,13 @@ class Settings(context: Context) {
         enumOrDefault(prefs.getString("histPeriod", null), HistoryPeriod.MONTH)
     )
         private set
+
+    /** Contatore delle consultazioni: fa ruotare le frasi. */
+    fun nextSeed(): Int {
+        val n = prefs.getInt("seed", 0) + 1
+        prefs.edit().putInt("seed", n).apply()
+        return n
+    }
 
     private fun readOrder(): List<CardId> {
         val saved = prefs.getString("order", null)
