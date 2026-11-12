@@ -143,6 +143,29 @@ class DashboardViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    var exporting by mutableStateOf(false)
+        private set
+
+    /** Prepara il file di esportazione; null se qualcosa va storto. */
+    suspend fun buildExport(): java.io.File? {
+        val r = repo ?: return null
+        exporting = true
+        return try {
+            val text = r.exportCsv(granted, settings.stepGoal, coach)
+            withContext(Dispatchers.IO) {
+                val dir = java.io.File(getApplication<Application>().cacheDir, "exports").apply { mkdirs() }
+                dir.listFiles()?.forEach { it.delete() }
+                java.io.File(dir, "polso-${LocalDate.now()}.csv").apply { writeText(text) }
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            null
+        } finally {
+            exporting = false
+        }
+    }
+
     fun shiftDay(delta: Long) {
         val next = day.plusDays(delta)
         if (next.isAfter(LocalDate.now())) return

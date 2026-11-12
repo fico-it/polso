@@ -439,6 +439,168 @@ class HealthRepo(context: Context) {
         )
     }
 
+    /**
+     * Esportazione per l'analisi esterna: una riga per giorno con tutto
+     * ciò che Connessione Salute conserva (fino a 3 anni), seguita dai
+     * passi ora per ora degli ultimi 28 giorni. Formato CSV con ';'.
+     */
+    suspend fun exportCsv(granted: Set<String>, goal: Int, coach: CoachResult?, today: LocalDate = LocalDate.now()): String {
+        val from = today.minusDays(3 * 365L)
+        val startI = from.atStartOfDay(zone).toInstant()
+        val endI = today.plusDays(1).atStartOfDay(zone).toInstant()
+        val range = TimeRangeFilter.between(startI, endI)
+
+        val steps = dailySeries(Metric.STEPS, from, today, granted) ?: emptyMap()
+        val distance = dailySeries(Metric.DISTANCE, from, today, granted) ?: emptyMap()
+        val kcal = dailySeries(Metric.CALORIES, from, today, granted) ?: emptyMap()
+        val resting = dailySeries(Metric.RESTING, from, today, granted) ?: emptyMap()
+        val hrv = dailySeries(Metric.HRV, from, today, granted) ?: emptyMap()
+
+        // battito: minimo, massimo e medio per giorno
+        val hrDay = mutableMapOf<LocalDate, Triple<Long, Long, Long>>()
+        if (granted.allows(HeartRateRecord::class)) safe {
+            client.aggregateGroupByPeriod(
+                AggregateGroupByPeriodRequest(
+                    metrics = setOf(HeartRateRecord.BPM_MIN, HeartRateRecord.BPM_MAX, HeartRateRecord.BPM_AVG),
+                    timeRangeFilter = TimeRangeFilter.between(from.atStartOfDay(), today.plusDays(1).atStartOfDay()),
+                    timeRangeSlicer = Period.ofDays(1),
+                )
+            ).forEach { r ->
+                val mn = r.result[HeartRateRecord.BPM_MIN]
+                val mx = r.result[HeartRateRecord.BPM_MAX]
+                val av = r.result[HeartRateRecord.BPM_AVG]
+                if (mn != null && mx != null && av != null) {
+                    hrDay[r.startTime.toLocalDate()] = Triple(mn, mx, av)
+                }
+            }
+        }
+
+        // sonno: sessione principale della notte che termina nel giorno
+        data class SleepRow(val start: Instant, val end: Instant, val deep: Long, val rem: Long, val light: Long, val awake: Long)
+        val sleep = mutableMapOf<LocalDate, SleepRow>()
+        if (granted.allows(SleepSessionRecord::class)) safe {
+            val f = from.minusDays(1).atTime(18, 0).atZone(zone).toInstant()
+            readAll(SleepSessionRecord::class, TimeRangeFilter.between(f, endI))
+                .groupBy { it.endTime.atZone(zone).toLocalDate() }
+                .forEach { (date, sessions) ->
+                    val main = sessions.maxBy { Duration.between(it.startTime, it.endTime).seconds }
+                    var deep = 0L
+                    var rem = 0L
+                    var light = 0L
+                    var awake = 0L
+                    sessions.flatMap { it.stages }.forEach { st ->
+                        val m = Duration.between(st.startTime, st.endTime).toMinutes()
+                        when (st.stage) {
+                            SleepSessionRecord.STAGE_TYPE_DEEP -> { deep += m }
+                            SleepSessionRecord.STAGE_TYPE_REM -> { rem += m }
+                            SleepSessionRecord.STAGE_TYPE_AWAKE,
+                            SleepSessionRecord.STAGE_TYPE_AWAKE_IN_BED,
+                            SleepSessionRecord.STAGE_TYPE_OUT_OF_BED -> { awake += m }
+                            else -> { light += m }
+                        }
+                        Unit
+                    }
+                    if (deep + rem + light + awake == 0L) {
+                        light = sessions.sumOf { Duration.between(it.startTime, it.endTime).toMinutes() }
+                    }
+                    sleep[date] = SleepRow(main.startTime, main.endTime, deep, rem, light, awake)
+                }
+        }
+
+        val spo2 = mutableMapOf<LocalDate, MutableList<Double>>()
+        if (granted.allows(OxygenSaturationRecord::class)) safe {
+            readAll(OxygenSaturationRecord::class, range).forEach {
+                spo2.getOrPut(it.time.atZone(zone).toLocalDate()) { mutableListOf() } += it.percentage.value
+            }
+        }
+        val resp = mutableMapOf<LocalDate, MutableList<Double>>()
+        if (granted.allows(RespiratoryRateRecord::class)) safe {
+            readAll(RespiratoryRateRecord::class, range).forEach {
+                resp.getOrPut(it.time.atZone(zone).toLocalDate()) { mutableListOf() } += it.rate
+            }
+        }
+        val workouts = mutableMapOf<LocalDate, MutableList<String>>()
+        if (granted.allows(ExerciseSessionRecord::class)) safe {
+            readAll(ExerciseSessionRecord::class, range).forEach {
+                val name = (it.title ?: exerciseName(it.exerciseType)).replace(";", ",")
+                val min = Duration.between(it.startTime, it.endTime).toMinutes()
+                workouts.getOrPut(it.startTime.atZone(zone).toLocalDate()) { mutableListOf() } +=
+                    "$name ${min}min ${it.startTime.atZone(zone).toLocalTime().toString().take(5)}"
+            }
+        }
+
+        val history = longHistory(granted, today)
+        val index = Coach.dailyIndex(history, goal)
+
+        val days = (steps.keys + distance.keys + kcal.keys + resting.keys + hrv.keys + hrDay.keys +
+            sleep.keys + spo2.keys + resp.keys + workouts.keys).toSortedSet()
+
+        fun d1(v: Double?) = v?.let { String.format(java.util.Locale.ITALY, "%.1f", it) } ?: ""
+        fun d0(v: Double?) = v?.let { Math.round(it).toString() } ?: ""
+        fun hm(i: Instant) = i.atZone(zone).toLocalTime().toString().take(5)
+
+        val sb = StringBuilder()
+        sb.appendLine("# Polso - esportazione dati per analisi")
+        sb.appendLine("# generato: ${java.time.LocalDateTime.now().toString().take(16).replace('T', ' ')}")
+        sb.appendLine("# dispositivo: HUAWEI Band 11, dati via Huawei Health > Health Sync > Connessione Salute")
+        sb.appendLine("# obiettivo passi giornaliero: $goal")
+        coach?.score?.let { sb.appendLine("# indice di forma (media esponenziale 45/180 giorni): ${(it * 100).toInt()}%") }
+        coach?.recentScore?.let { sb.appendLine("# indice ultimi 7 giorni: ${(it * 100).toInt()}%") }
+        sb.appendLine("# giorni con dati: ${days.size}")
+        sb.appendLine("# indice giornaliero: passi 55% (tetto 150% obiettivo), sonno 25% (pieno 7-9 h), cuore 20% (riposo e HRV vs mediana 30 gg); SpO2 min <90% riduce")
+        sb.appendLine("# sonno attribuito al giorno del risveglio; valori vuoti = non misurati")
+        sb.appendLine()
+        sb.appendLine(
+            "data;giorno;passi;distanza_km;kcal_attive;sonno_inizio;sonno_fine;sonno_ore;profondo_min;rem_min;" +
+                "leggero_min;sveglio_min;battito_riposo;battito_min;battito_medio;battito_max;hrv_ms;" +
+                "spo2_media;spo2_min;respirazione;allenamenti;indice_giorno"
+        )
+        days.forEach { d ->
+            val s = sleep[d]
+            val asleep = s?.let { (it.deep + it.rem + it.light) / 60.0 }
+            val hr = hrDay[d]
+            val o = spo2[d]
+            val r = resp[d]
+            sb.appendLine(
+                listOf(
+                    d.toString(),
+                    d.dayOfWeek.getDisplayName(java.time.format.TextStyle.SHORT, java.util.Locale.ITALIAN),
+                    steps[d]?.let { Math.round(it).toString() } ?: "",
+                    d1(distance[d]),
+                    d0(kcal[d]),
+                    s?.let { hm(it.start) } ?: "",
+                    s?.let { hm(it.end) } ?: "",
+                    d1(asleep),
+                    s?.deep?.toString() ?: "",
+                    s?.rem?.toString() ?: "",
+                    s?.light?.toString() ?: "",
+                    s?.awake?.toString() ?: "",
+                    d0(resting[d]),
+                    hr?.first?.toString() ?: "",
+                    hr?.third?.toString() ?: "",
+                    hr?.second?.toString() ?: "",
+                    d0(hrv[d]),
+                    d0(o?.average()),
+                    d0(o?.minOrNull()),
+                    d1(r?.average()),
+                    workouts[d]?.joinToString(" | ") ?: "",
+                    index[d]?.let { "${(it * 100).toInt()}" } ?: "",
+                ).joinToString(";")
+            )
+        }
+
+        val hourly = hourlyProfile(granted, 28, today)
+        if (hourly.isNotEmpty()) {
+            sb.appendLine()
+            sb.appendLine("# passi ora per ora, ultimi 28 giorni")
+            sb.appendLine("data;" + (0..23).joinToString(";") { "h%02d".format(it) })
+            hourly.toSortedMap().forEach { (d, hours) ->
+                sb.appendLine("$d;" + hours.joinToString(";"))
+            }
+        }
+        return sb.toString()
+    }
+
     private fun exerciseName(type: Int): String = when (type) {
         ExerciseSessionRecord.EXERCISE_TYPE_WALKING -> "Camminata"
         ExerciseSessionRecord.EXERCISE_TYPE_RUNNING -> "Corsa"

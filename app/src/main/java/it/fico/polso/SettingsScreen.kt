@@ -42,6 +42,7 @@ fun SettingsScreen(
     vm: DashboardViewModel,
     onRequestPermissions: () -> Unit,
     onRequestHistory: () -> Unit,
+    onExport: () -> Unit,
 ) {
     val s = vm.settings
     Column(
@@ -154,6 +155,22 @@ fun SettingsScreen(
                 fontSize = 12.sp,
                 color = Palette.Muted,
             )
+        }
+
+        Section("Esportazione") {
+            Text(
+                "Crea un file con tutti i dati accumulati, giorno per giorno, più i passi ora per ora " +
+                    "delle ultime 4 settimane. Condividilo con Claude per una valutazione approfondita.",
+                fontSize = 13.sp,
+                color = Palette.Muted,
+            )
+            Spacer(Modifier.height(10.dp))
+            Button(
+                onClick = onExport,
+                enabled = !vm.exporting,
+                colors = ButtonDefaults.buttonColors(containerColor = Palette.Hrv, contentColor = Color.Black),
+                modifier = Modifier.fillMaxWidth(),
+            ) { Text(if (vm.exporting) "Preparo i dati…" else "Esporta i dati") }
         }
 
         Section("Permessi") {

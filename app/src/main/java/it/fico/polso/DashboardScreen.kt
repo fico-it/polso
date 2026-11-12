@@ -75,6 +75,7 @@ fun DashboardScreen(
     onRequestPermissions: () -> Unit,
     onRequestHistory: () -> Unit,
     onOpenHealthConnect: () -> Unit,
+    onExport: () -> Unit,
 ) {
     BackHandler(enabled = vm.showSettings) { vm.showSettings = false }
 
@@ -118,9 +119,9 @@ fun DashboardScreen(
 
                 Status.READY ->
                     if (vm.showSettings) {
-                        SettingsScreen(vm, onRequestPermissions, onRequestHistory)
+                        SettingsScreen(vm, onRequestPermissions, onRequestHistory, onExport)
                     } else {
-                        Dashboard(vm, onRequestPermissions, onOpenHealthConnect)
+                        Dashboard(vm, onRequestPermissions, onOpenHealthConnect, onExport)
                     }
             }
         }
@@ -144,6 +145,7 @@ private fun Dashboard(
     vm: DashboardViewModel,
     onRequestPermissions: () -> Unit,
     onOpenHealthConnect: () -> Unit,
+    onExport: () -> Unit,
 ) {
     val d = vm.data
     val s = vm.settings
@@ -221,7 +223,7 @@ private fun Dashboard(
             }
         }
 
-        item { Footer(vm, onRequestPermissions, onOpenHealthConnect) }
+        item { Footer(vm, onRequestPermissions, onOpenHealthConnect, onExport) }
     }
 }
 
@@ -979,8 +981,16 @@ private fun Footer(
     vm: DashboardViewModel,
     onRequestPermissions: () -> Unit,
     onOpenHealthConnect: () -> Unit,
+    onExport: () -> Unit,
 ) {
     Column(Modifier.padding(vertical = 8.dp)) {
+        Button(
+            onClick = onExport,
+            enabled = !vm.exporting,
+            colors = ButtonDefaults.buttonColors(containerColor = Palette.Hrv, contentColor = Color.Black),
+            modifier = Modifier.fillMaxWidth(),
+        ) { Text(if (vm.exporting) "Preparo i dati…" else "Esporta i dati per un'analisi") }
+        Spacer(Modifier.height(12.dp))
         Text(
             "I dati arrivano da Connessione Salute (Huawei Health → Health Sync). " +
                 "Lo stress non è disponibile: Connessione Salute non lo prevede. " +
